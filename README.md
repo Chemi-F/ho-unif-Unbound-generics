@@ -1,7 +1,21 @@
-# ho-unif-Unbound-generics
+# 高階パターン単一化のUnboundライブラリを用いたHaskellによる実装
 
-src/alphabetic.hs
--- Nipkow が ML で実装したコードを Haskell に書き直したコード。
+Unbound-generics ライブラリを用いた高階パターン単一化の実装
 
-src/alphabeticUnbound.hs
--- 上記のコードを Unbound-generics を使って実装したコード。
+# File
+* src/alphabetic.hs
+Nipkow が ML で実装したコードを Haskell に書き直したコード。
+
+* src/alphabeticUnbound.hs
+上記のコードを Unbound を使って実装したコード。
+
+# Requirement
+* Stack
+
+# Intallation
+```bash
+stack install
+cd src
+stack ghci alphabetic.hs
+stack ghci alphabeticUnbound.hs
+```

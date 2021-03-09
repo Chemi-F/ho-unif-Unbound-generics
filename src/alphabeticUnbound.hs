@@ -113,7 +113,7 @@ occ _F th t = occ' t
                          in elem _F ids
         occ' _         = False
 
--- in Unbound.LocallyNameless.Subst
+-- in Unbound.Generics.LocallyNameless.Subst
 -- subst :: ID -> Term -> Term -> Term
 -- subst x y t = t[x:=y]
 

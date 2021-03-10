@@ -15,7 +15,7 @@ type ID = String
 data Term = V ID -- free variable
           | B ID -- bound variable
           | C ID -- constant
-          | App Term [Term] -- application
+          | App Term Term -- application
           | Abs ID Term -- abstraction
     deriving (Show, Eq)
 
@@ -51,8 +51,10 @@ term2ID :: Term -> ID
 term2ID (B s) = s
 
 strip :: Term -> (Term, [Term])
-strip (App t ts) = (t, ts)
-strip t = (t, [])
+strip t = strip' (t, [])
+    where
+        strip' (App s t, ts) = strip' (s, t:ts)
+        strip' p = p
 
 -- make Lxs. t
 makeAbs :: [Term] -> Term -> Term
@@ -60,8 +62,7 @@ makeAbs xs t = foldr (\x t -> Abs x t) t (map term2ID xs)
 
 -- make Lxs. _F@ts
 hnf :: [Term] -> Term -> [Term] -> Term
-hnf xs _F [] = makeAbs xs _F
-hnf xs _F ts = makeAbs xs (App _F ts)
+hnf xs _F ts = makeAbs xs (foldl (\f t -> App f t) _F ts)
 
 
 -- (*** Substitutions ***)
@@ -70,19 +71,19 @@ hnf xs _F ts = makeAbs xs (App _F ts)
 occ :: ID -> Theta -> Term -> Bool
 occ _F th t = occ' t
     where
-        occ' (V _G)    = _F == _G || case lookup _G th of
-                                         Just s  -> occ' s
-                                         Nothing -> False
-        occ' (App t ts) = occ' t || or (map occ' ts)
-        occ' (Abs _ s) = occ' s
-        occ' _         = False
+        occ' (V _G)      = _F == _G || case lookup _G th of
+                                           Just s  -> occ' s
+                                           Nothing -> False
+        occ' (App t1 t2) = occ' t1 || occ' t2
+        occ' (Abs _ s)   = occ' s
+        occ' _           = False
 
 -- subst x y t = t[x:=y]
 subst :: ID -> ID -> Term -> Term
 subst x y t = sub t
     where 
         sub (B z)       = if z == x then B y else B z
-        sub (App s ss)  = App (sub s) (map sub ss)
+        sub (App t1 t2) = App (sub t1) (sub t2)
         sub (Abs z s)   = if z == x then Abs z s else
                           if z /= y then Abs z (sub s) else
                           let z' = newB
@@ -92,7 +93,8 @@ subst x y t = sub t
 -- beta-reduction
 red :: Term -> [Term] -> Term
 red (Abs x s) (y:ys) = red (subst x (term2ID y) s) ys
-red s ys             = App s ys
+red s (y:ys)         = red (App s y) ys
+red s []             = s
 
 -- "lazy" form of substitution application
 devar :: Theta -> Term -> Term
@@ -180,12 +182,9 @@ unif s t = unif' [] (s, t)
             case (devar th s, devar th t) of
                 (Abs x s', Abs y t') -> 
                     unif' th (s', if x == y then t' else subst y x t')
-                (Abs x s', t') -> unif' th (s', addApp t' (B x))
-                (s', Abs x t') -> unif' th (addApp s' (B x), t')
+                (Abs x s', t') -> unif' th (s', App t' (B x))
+                (s', Abs x t') -> unif' th (App s' (B x), t')
                 (s', t')       -> cases th (s', t')
-                where
-                    addApp (App t xs) v = App t (xs ++ [v])
-                    addApp t v = App t [v]
 
         cases th (s, t) = case (strip s, strip t) of
             ((V _F, xm), (V _G, yn)) -> flexflex _F xm _G yn th
@@ -219,7 +218,11 @@ prTerm :: Term -> String
 prTerm (V x) = x
 prTerm (B x) = "#" ++ x
 prTerm (C x) = "_" ++ x
-prTerm (App t ts) = prTerm t ++ "(" ++ prTerms ts ++ ")"
+prTerm (App t1 t2) =
+    let (t, ts) = strip (App t1 t2)
+    in case ts of
+        []  -> prTerm t
+        ts' -> prTerm t ++ "(" ++ prTerms ts' ++ ")"
 prTerm (Abs x t) = prAbs [x] t
     where
         prAbs ids (Abs x t) = prAbs (ids ++ [x]) t
@@ -291,8 +294,11 @@ term = do
         spaces >> char '(' >> spaces
         ts <- pTerms
         spaces >> char ')' >> spaces
-        return (App f ts)
+        return (makeApp f ts)
         <|> return f
+    where
+        makeApp f (t:[]) = App f t
+        makeApp f (t:ts) = makeApp (App f t) ts
 
 pTerms :: Parser [Term]
 pTerms = do
@@ -343,3 +349,17 @@ pString = do
     where
         firstChar = satisfy (\a -> isLetter a)
         nonFirstChar = satisfy (\a -> isDigit a || isLetter a)
+
+-- first-order
+-- x + (s(y) + y) =? s(z) + z
+example1 = unifP "_Add(x,_Add(_s(y),y))" "_Add(_s(z),z)"
+
+-- x + (0 + y) =? s(z) + (0 + x)
+example2 = unifP "_Add(x,_Add(_Zero,y))" "_Add(_s(z),_Add(_Zero,x))"
+
+-- f(g(x, y), x, y) =? f(z, g(y, y), y)
+example3 = unifP "_f(_g(x, y), x, y)" "_f(z, _g(y, y), y)"
+
+-- higher-order
+-- λx,y.F(x) =? λx,y.c(G(y, x))
+example4 = unifP "Lx,y.F(#x)" "Lx,y._c(G(#y, #x))" 

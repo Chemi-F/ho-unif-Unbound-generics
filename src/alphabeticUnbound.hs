@@ -19,12 +19,14 @@ import Text.Parsec.String (Parser)
 
 -- IDentifier
 type ID = Name Term
+-- CID は定数用
+-- 定数名を ID にしてしまうと、Unbound側で変数として扱われてしまう
 type CID = String
 
 data Term = V ID -- variable
           | F ID -- free variable
           | C CID -- constant
-          | App Term [Term] -- application
+          | App Term Term -- application
           | Abs (Bind ID Term) -- abstraction
     deriving (Show, Generic, Typeable)
 
@@ -74,10 +76,8 @@ cap :: Eq a => [a] -> [a] -> [a]
 -- (*** Terms ***)
 
 -- create new free var name
--- generally, use lfresh then we can get fresh variable name
---
--- avoid (F, G) H --> H
--- avoid (F, H) H --> H1
+-- avoid [F, G] H --> H
+-- avoid [F, H] H --> H1
 newFv :: LFresh m => [AnyName] -> m Term
 newFv anys = F <$> newName anys
     where
@@ -87,8 +87,10 @@ term2ID :: Term -> ID
 term2ID (V id) = id
 
 strip :: Term -> (Term, [Term])
-strip (App t ts) = (t, ts)
-strip t = (t, [])
+strip t = strip' (t, [])
+    where
+        strip' (App s t, ts) = strip' (s, t:ts)
+        strip' p = p
 
 -- make Lxs. t
 makeAbs :: LFresh m => [Term] -> Term -> m Term
@@ -96,7 +98,7 @@ makeAbs xs t = return $ foldr (\x t -> Abs (bind x t)) t (map term2ID xs)
 
 -- make Lxs. _F@ts
 hnf :: LFresh m => [Term] -> Term -> [Term] -> m Term
-hnf xs _F ts = makeAbs xs (App _F ts)
+hnf xs _F ts = makeAbs xs (foldl (\f t -> App f t) _F ts)
 
 
 -- (*** Substitutions ***)
@@ -108,7 +110,7 @@ occ _F th t = occ' t
         occ' (F _G)    = _F == _G || case lookup _G th of
                                          Just t  -> occ' t
                                          Nothing -> False
-        occ' (App t ts) = occ' t || or (map occ' ts)
+        occ' (App t1 t2) = occ' t1 || occ' t2
         occ' (Abs b)   = let ids = toListOf fv (Abs b) :: [ID]
                          in elem _F ids
         occ' _         = False
@@ -120,7 +122,8 @@ occ _F th t = occ' t
 -- beta-reduction
 red :: LFresh m => Term -> [Term] -> m Term
 red (Abs b) (y:ys) = lunbind b $ \(x, s) -> red (subst x y s) ys
-red s ys           = return $ App s ys
+red s (y:ys)       = red (App s y) ys
+red s []           = return s
 
 -- "lazy" form of substitution application
 devar :: LFresh m => Theta -> Term -> m Term
@@ -136,6 +139,11 @@ devar th t =
 
 
 -- (*** Unification ***)
+
+-- 返り値の型 ExceptT String (LFreshM IO) Theta で、IO はデバッグ用
+-- do から liftIO $ putStrLn までは関数の動作には影響がない部分
+-- 本来の型は ExceptT String LFreshM Theta で十分
+-- このことは、同じ型の形をしている関数にも言える
 
 -- projection
 proj :: [ID] -> Theta -> Term -> ExceptT String (LFreshMT IO) Theta
@@ -243,13 +251,10 @@ unif s t =
                 (Abs b1, Abs b2) ->
                     lunbind2 b1 b2 $ \(Just (_, s', _, t')) -> unif' th (s', t')
                 (Abs b, t') ->
-                    lunbind b $ \(x, s') -> unif' th (s', addApp t' (V x))
+                    lunbind b $ \(x, s') -> unif' th (s', App t' (V x))
                 (s', Abs b) ->
-                    lunbind b $ \(x, t') -> unif' th (addApp s' (V x), t')
+                    lunbind b $ \(x, t') -> unif' th (App s' (V x), t')
                 (s', t') -> cases th (s', t')
-                where
-                    addApp (App t xs) v = App t (xs ++ [v])
-                    addApp t v = App t [v]
 
         cases th (s, t) = case (strip s, strip t) of
             ((F _F, xm), (F _G, yn)) -> flexflex _F xm _G yn th
@@ -286,14 +291,17 @@ unifP s1 s2 =
 -- Print
 
 prTerm :: LFresh m => Term -> m String
-prTerm (F x) = return $ "#" ++ show x
-prTerm (V x) = return $ show x
+prTerm (F x) = return $ show x
+prTerm (V x) = return $ "#" ++ show x
 prTerm (C x) = return $ "_" ++ x
-prTerm (App t []) = prTerm t
-prTerm (App t ts) = do
-    t' <- prTerm t
-    ts' <- prTerms ts
-    return $ t' ++ "(" ++ ts' ++ ")"
+prTerm (App t1 t2) =
+    let (t, ts) = strip (App t1 t2)
+    in case ts of
+        []  -> prTerm t
+        ts' -> do
+            prt   <- prTerm t
+            prts' <- prTerms ts'
+            return $ prt ++ "(" ++ prts' ++ ")"
 prTerm (Abs b) = prAbs [] (Abs b)
     where
         prAbs ids (Abs b) = do
@@ -372,8 +380,11 @@ term = do
         spaces >> char '(' >> spaces
         ts <- pTerms
         spaces >> char ')' >> spaces
-        return (App f ts)
+        return (makeApp f ts)
         <|> return f
+    where
+        makeApp f (t:[]) = App f t
+        makeApp f (t:ts) = makeApp (App f t) ts
 
 pTerms :: Parser [Term]
 pTerms = do
@@ -417,3 +428,18 @@ pString = do
     where
         firstChar = satisfy (\a -> isLetter a)
         nonFirstChar = satisfy (\a -> isDigit a || isLetter a)
+
+
+-- first-order
+-- x + (s(y) + y) =? s(z) + z
+example1 = unifP "_Add(x,_Add(_s(y),y))" "_Add(_s(z),z)"
+
+-- x + (0 + y) =? s(z) + (0 + x)
+example2 = unifP "_Add(x,_Add(_Zero,y))" "_Add(_s(z),_Add(_Zero,x))"
+
+-- f(g(x, y), x, y) =? f(z, g(y, y), y)
+example3 = unifP "_f(_g(x, y), x, y)" "_f(z, _g(y, y), y)"
+
+-- higher-order
+-- λx,y.F(x) =? λx,y.c(G(y, x))
+example4 = unifP "Lx,y.F(x)" "Lx,y._c(G(y, x))" 
